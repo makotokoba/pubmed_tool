@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PubMed to NotebookLM</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#F4F7FB;color:#0F1F35;font-size:15px;line-height:1.6}
+header{background:#0F1F35;height:50px;display:flex;align-items:center;padding:0 20px;gap:12px}
+header h1{color:#fff;font-size:14px;font-weight:700}
+header p{color:#7A8EA8;font-size:12px}
+.wrap{max-width:700px;margin:0 auto;padding:24px 16px 80px}
+h2{font-size:16px;font-weight:700;margin-bottom:10px}
+.lbl{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1A6CF6;margin-bottom:4px}
+.card{background:#fff;border:1px solid #D4DCE8;border-radius:10px;padding:16px;margin-bottom:20px}
+textarea{width:100%;border:1.5px solid #D4DCE8;border-radius:7px;padding:12px;
+  font-size:13px;font-family:monospace;resize:vertical;outline:none;
+  color:#0F1F35;background:#FAFCFF;min-height:120px}
+textarea:focus{border-color:#1A6CF6}
+textarea[readonly]{background:#F0F4FA;color:#4A5568}
+.badge{display:inline-flex;align-items:center;gap:5px;margin-top:8px;
+  font-size:12px;font-weight:600;color:#059669;background:#ECFDF5;
+  border:1px solid #6EE7B7;border-radius:999px;padding:3px 10px;
+  visibility:hidden}
+.badge.show{visibility:visible}
+.chips{margin-top:10px;display:flex;flex-direction:column;gap:5px}
+.chip{display:flex;align-items:center;gap:8px;padding:6px 10px;
+  background:#F0F4FA;border-radius:6px;font-family:monospace;font-size:12px}
+.chip-t{background:#1A6CF6;color:#fff;border-radius:4px;
+  padding:1px 6px;font-size:10px;font-weight:700;flex-shrink:0}
+.chip-v{word-break:break-all}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;
+  width:100%;padding:14px;border-radius:8px;font-size:15px;font-weight:700;
+  cursor:pointer;border:none;margin-top:12px}
+.blue{background:#1A6CF6;color:#fff}
+.blue:hover{background:#1558D6}
+.gray{background:#fff;color:#0F1F35;border:1.5px solid #D4DCE8}
+.gray:hover{background:#EBF4FF}
+.hint{font-size:13px;color:#4A5568;margin-top:12px;line-height:1.7}
+.hint b{color:#1A6CF6}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(16px);
+  background:#1E2A3A;color:#fff;font-size:13px;font-weight:600;
+  padding:10px 20px;border-radius:999px;opacity:0;
+  transition:opacity .25s,transform .25s;pointer-events:none;z-index:99;white-space:nowrap}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<header>
+  <h1>PubMed to NotebookLM</h1>
+  <p>抄録一括取得ツール</p>
+</header>
+<div class="wrap">
+
+  <div class="lbl">Step 1</div>
+  <h2>検索結果を貼り付け</h2>
+  <div class="card">
+    <textarea id="inp" rows="6"
+      placeholder="Consensus / OpenEvidence の検索結果を&#10;全選択してコピーし、ここに貼り付けてください。&#10;&#10;DOI や PubMed URL を自動で抽出します。"></textarea>
+    <div id="badge" class="badge">&#10003; <span id="cnt">0</span> 件の文献を検出</div>
+    <div id="chips" class="chips"></div>
+    <button class="btn gray" onclick="clearAll()">クリア</button>
+  </div>
+
+  <div class="lbl">Step 2</div>
+  <h2>プロンプトをコピーして Claude に送る</h2>
+  <div class="card">
+    <textarea id="out" rows="7" readonly
+      placeholder="Step 1 にテキストを貼り付けると&#10;ここにプロンプトが自動生成されます"></textarea>
+    <button class="btn blue" onclick="doCopy()">&#128203;&#160;プロンプトをコピー</button>
+    <p class="hint">
+      コピーしたら、このアプリを閉じて <b>Claude のチャット画面に貼り付けて送信</b> してください。<br>
+      Claude が抄録を返したら、NotebookLM の「ソースを追加 → テキストをコピー」に貼り付けて完了です。
+    </p>
+  </div>
+
+</div>
+<div id="toast"></div>
+
+<script>
+var inp   = document.getElementById('inp');
+var badge = document.getElementById('badge');
+var cnt   = document.getElementById('cnt');
+var chips = document.getElementById('chips');
+var out   = document.getElementById('out');
+
+inp.addEventListener('input', run);
+inp.addEventListener('paste', function(){ setTimeout(run, 150); });
+
+function run() {
+  var text  = inp.value;
+  var items = extract(text);
+  if (items.length > 0) {
+    cnt.textContent = items.length;
+    badge.className = 'badge show';
+  } else {
+    badge.className = 'badge';
+  }
+  var html = '';
+  for (var i = 0; i < items.length; i++) {
+    html += '<div class="chip"><span class="chip-t">' + items[i].t +
+            '</span><span class="chip-v">' + items[i].v + '</span></div>';
+  }
+  chips.innerHTML = html;
+  out.value = items.length > 0 ? buildPrompt(items) : '';
+}
+
+function extract(text) {
+  var result = [];
+  var seen   = {};
+  var m;
+
+  var r1 = /pubmed\.ncbi\.nlm\.nih\.gov\/([0-9]+)/g;
+  while ((m = r1.exec(text)) !== null) {
+    if (!seen[m[1]]) { seen[m[1]] = 1; result.push({t:'PMID', v:m[1]}); }
+  }
+
+  var r2 = /PMID[ :#]+([0-9]{6,9})/gi;
+  while ((m = r2.exec(text)) !== null) {
+    if (!seen[m[1]]) { seen[m[1]] = 1; result.push({t:'PMID', v:m[1]}); }
+  }
+
+  var r3 = /(?:doi\.org\/|doi[ :]+)(10\.[0-9]{4,}\/[^ ,\]>"'\n]+)/gi;
+  while ((m = r3.exec(text)) !== null) {
+    var v = m[1].replace(/[.),;]+$/, '');
+    if (!seen[v]) { seen[v] = 1; result.push({t:'DOI', v:v}); }
+  }
+
+  return result;
+}
+
+function buildPrompt(items) {
+  var lines = '';
+  for (var i = 0; i < items.length; i++) {
+    lines += (i + 1) + '. ' + items[i].t + ': ' + items[i].v + '\n';
+  }
+  return 'Please provide the abstract for each of the following papers.\n\n' +
+    '[Paper list]\n' + lines +
+    '\nFor each paper, reply in this format (no preamble, use dividers between papers):\n\n' +
+    '==============================\n' +
+    'Title:\nAuthors:\nJournal:\nDOI:\n\nAbstract:\n(full abstract in English)\n' +
+    '==============================\n\n' +
+    'If you do not know a paper, write: Not found: [identifier]';
+}
+
+function clearAll() {
+  inp.value = '';
+  out.value = '';
+  badge.className = 'badge';
+  chips.innerHTML = '';
+}
+
+function doCopy() {
+  var text = out.value;
+  if (!text.trim()) { showToast('Step 1 にテキストを貼り付けてください'); return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function() {
+      showToast('コピーしました！Claude のチャットに貼り付けてください');
+    }).catch(function() { fallback(); });
+  } else {
+    fallback();
+  }
+}
+
+function fallback() {
+  out.select();
+  try {
+    document.execCommand('copy');
+    showToast('コピーしました！');
+  } catch(e) {
+    showToast('テキストを長押しして手動でコピーしてください');
+  }
+}
+
+var tid;
+function showToast(msg) {
+  var el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show';
+  clearTimeout(tid);
+  tid = setTimeout(function(){ el.className = ''; }, 3500);
+}
+</script>
+</body>
+</html>
